@@ -6,4 +6,4 @@ This profile contains multiple projects related to software development and expe
 
 Start exploring the wiki here:
 
-➡️ https://github.com/MarcelClaus/MarcelClaus/wiki## 
+➡️ https://github.com/MarcelClaus/MarcelClaus/wiki
