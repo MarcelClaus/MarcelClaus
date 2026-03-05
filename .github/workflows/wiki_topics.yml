@@ -135,18 +135,14 @@ jobs:
 
       - name: Clone wiki repo
         env:
-          GITHUB_TOKEN: ${{ secrets.READ_WIKI_TOPICS }}
+          WIKI_TOKEN: ${{ secrets.READ_WIKI_TOPICS }}
         run: |
-          # Zorg dat de map niet bestaat
           rm -rf wiki
-          
-          # Clone de wiki repo
-          git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki          
-          # Ga naar de wiki
-          cd wiki
+          git clone --depth 1 "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+
       - name: Copy generated pages into wiki repo
         run: |
-          rsync -a --delete _wiki_out/ wiki/
+          rsync -a --delete --exclude '.git' _wiki_out/ wiki/
 
       - name: Commit and push wiki changes
         run: |
