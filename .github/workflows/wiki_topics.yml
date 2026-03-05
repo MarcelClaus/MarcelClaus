@@ -1,4 +1,3 @@
-```yaml
 name: Update Wiki topic index
 
 on:
@@ -285,4 +284,3 @@ jobs:
 
           git commit -m "Auto-update topic index"
           git push
-```
