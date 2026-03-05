@@ -17,7 +17,7 @@ jobs:
 
       - name: Fetch repos + topics and generate wiki pages
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.READ_WIKI_TOPICS }}
         run: |
           set -euo pipefail
 
@@ -135,7 +135,7 @@ jobs:
 
       - name: Clone wiki repo
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.READ_WIKI_TOPICS }}
         run: |
           # Zorg dat de map niet bestaat
           rm -rf wiki
