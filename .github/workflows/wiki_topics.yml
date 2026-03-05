@@ -23,23 +23,46 @@ jobs:
 
           # 1) Haal jouw repos op + topics (40 repos -> 1 pagina is genoeg; toch maken we paging-proof)
           python3 - <<'PY'
-          import json, subprocess, os
+          import json
+          import os
+          import subprocess
           from collections import defaultdict
           
+          # ------------------------------------------------------------
+          # Config
+          # ------------------------------------------------------------
+          OUTDIR = "_wiki_out"
+          TOPICS_FOLDER_NAME = "Topics"               # visible "folder" name in wiki sidebar
+          OVERVIEW_PAGE = "Overview.md"              # generated (dynamic) overview page
+          NO_TOPICS_PAGE = "Repos-zonder-topics.md"  # generated list of repos without topics
+          
+          # ------------------------------------------------------------
+          # GitHub GraphQL helper (uses gh cli + GH_TOKEN from env)
+          # ------------------------------------------------------------
           def gh_graphql(query: str, owner: str, after: str | None):
+              """
+              Call GitHub GraphQL through `gh api graphql`.
+          
+              IMPORTANT:
+              - owner is passed with -F so it is treated as a string.
+              - after is only passed when it has a value (never pass null).
+              """
               cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}"]
               if after:
                   cmd += ["-F", f"after={after}"]
               out = subprocess.check_output(cmd, text=True)
               return json.loads(out)
           
+          # ------------------------------------------------------------
+          # Main
+          # ------------------------------------------------------------
           owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
           if not owner:
-              raise RuntimeError("GITHUB_REPOSITORY_OWNER not set")
+              raise RuntimeError("GITHUB_REPOSITORY_OWNER not set (should exist in GitHub Actions)")
           
           print("Scanning owner:", owner)
           
-          repos_query = r'''
+          repos_query = r"""
           query($owner:String!, $after:String) {
             repositoryOwner(login: $owner) {
               repositories(first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -50,21 +73,26 @@ jobs:
                   url
                   isArchived
                   isFork
-                  repositoryTopics(first: 25) { nodes { topic { name } } }
+                  repositoryTopics(first: 25) {
+                    nodes { topic { name } }
+                  }
                 }
               }
             }
           }
-          '''
+          """
           
+          # Fetch all repos (paging)
           all_repos = []
           after = None
-          
           while True:
               data = gh_graphql(repos_query, owner, after)
               ro = data["data"]["repositoryOwner"]
               if ro is None:
-                  raise RuntimeError(f"repositoryOwner(login={owner}) returned null. Check owner spelling / token permissions.")
+                  raise RuntimeError(
+                      f"repositoryOwner(login={owner}) returned null. "
+                      "Check owner spelling / token permissions."
+                  )
           
               all_repos.extend(ro["repositories"]["nodes"])
               page = ro["repositories"]["pageInfo"]
@@ -72,15 +100,12 @@ jobs:
                   break
               after = page["endCursor"]
           
+          # Filter out archived/forks (adjust if you want to include them)
           repos = [r for r in all_repos if not r.get("isArchived") and not r.get("isFork")]
           print(f"Total repos fetched: {len(all_repos)} (after filter: {len(repos)})")
           
-          # Debug
-          for r in repos[:10]:
-              ts = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
-              print("-", r["name"], "topics:", ts)
-          
-          topics = defaultdict(list)
+          # Build topic map
+          topics = defaultdict(list)   # topic -> list[repo]
           no_topics = []
           
           for r in repos:
@@ -93,44 +118,91 @@ jobs:
           
           print(f"Topic keys: {len(topics)} | Repos without topics: {len(no_topics)}")
           
-          outdir = "_wiki_out"
-          os.makedirs(outdir, exist_ok=True)
-          os.makedirs(os.path.join(outdir, "topics"), exist_ok=True)
+          # Prepare output dirs
+          topics_dir = os.path.join(OUTDIR, TOPICS_FOLDER_NAME)
+          os.makedirs(OUTDIR, exist_ok=True)
+          os.makedirs(topics_dir, exist_ok=True)
           
-          # Home.md
-          lines = [
-              "# Wiki Home",
+          # ------------------------------------------------------------
+          # 1) Overview.md (dynamic portal page)
+          # ------------------------------------------------------------
+          overview_lines = [
+              "# Overview",
               "",
               "Dit overzicht is automatisch gegenereerd uit GitHub repository topics.",
               "",
               "## Topics",
               "",
           ]
-          for t in sorted(topics.keys()):
+          
+          # Optional: sort topics by number of repos (descending), then name
+          for t in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
               page = t.replace(" ", "-")
-              lines.append(f"- [[topics/{page}|{t}]]")
-          lines.append("")
+              overview_lines.append(f"- [[{TOPICS_FOLDER_NAME}/{page}|{t}]] ({len(topics[t])})")
           
-          if no_topics:
-              lines += ["## Repos zonder topics", ""]
-              for r in sorted(no_topics, key=lambda x: x["name"].lower()):
-                  desc = (r.get("description") or "").strip()
-                  lines.append(f"- [{r['name']}]({r['url']})" + (f" — {desc}" if desc else ""))
-              lines.append("")
+          overview_lines += [
+              "",
+              "## Overig",
+              "",
+              f"- [[{NO_TOPICS_PAGE.replace('.md','')}|Repos zonder topics]] ({len(no_topics)})",
+              "",
+          ]
           
-          open(os.path.join(outdir, "Home.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
+          with open(os.path.join(OUTDIR, OVERVIEW_PAGE), "w", encoding="utf-8") as f:
+              f.write("\n".join(overview_lines) + "\n")
           
-          # per-topic pagina
-          for t in sorted(topics.keys()):
+          # ------------------------------------------------------------
+          # 2) Topic pages: Topics/<topic>.md
+          # ------------------------------------------------------------
+          for t in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
               page = t.replace(" ", "-")
-              pl = [f"# {t}", "", "Terug naar [[Home]].", ""]
+              lines = [
+                  f"# {t}",
+                  "",
+                  "Terug naar [[Overview]].",
+                  "",
+              ]
+          
               for r in sorted(topics[t], key=lambda x: x["name"].lower()):
                   desc = (r.get("description") or "").strip()
-                  pl.append(f"- [{r['name']}]({r['url']})" + (f" — {desc}" if desc else ""))
-              pl.append("")
-              open(os.path.join(outdir, "topics", f"{page}.md"), "w", encoding="utf-8").write("\n".join(pl) + "\n")
+                  if desc:
+                      lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
+                  else:
+                      lines.append(f"- [{r['name']}]({r['url']})")
           
-          print(f"Generated {len(topics)} topic pages and Home.md.")
+              lines.append("")
+          
+              with open(os.path.join(topics_dir, f"{page}.md"), "w", encoding="utf-8") as f:
+                  f.write("\n".join(lines) + "\n")
+          
+          # ------------------------------------------------------------
+          # 3) Repos-zonder-topics.md
+          # ------------------------------------------------------------
+          no_topics_lines = [
+              "# Repos zonder topics",
+              "",
+              "Deze repositories hebben nog geen GitHub topics ingesteld.",
+              "",
+              "Terug naar [[Overview]].",
+              "",
+          ]
+          
+          if not no_topics:
+              no_topics_lines.append("_Alles heeft topics. Nice._")
+          else:
+              for r in sorted(no_topics, key=lambda x: x["name"].lower()):
+                  desc = (r.get("description") or "").strip()
+                  if desc:
+                      no_topics_lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
+                  else:
+                      no_topics_lines.append(f"- [{r['name']}]({r['url']})")
+          
+          no_topics_lines.append("")
+          
+          with open(os.path.join(OUTDIR, NO_TOPICS_PAGE), "w", encoding="utf-8") as f:
+              f.write("\n".join(no_topics_lines) + "\n")
+          
+          print(f"Generated: {OVERVIEW_PAGE}, {TOPICS_FOLDER_NAME}/*, {NO_TOPICS_PAGE} in ./{OUTDIR}/")
           PY
 
       - name: Clone wiki repo
