@@ -21,13 +21,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) Haal jouw repos op + topics (40 repos -> 1 pagina is genoeg; toch maken we paging-proof)
           python3 - <<'PY'
           import json
           import os
+          import re
+          import shutil
           import subprocess
+          import unicodedata
           from collections import defaultdict
-          
+
           # ------------------------------------------------------------
           # Config
           # ------------------------------------------------------------
@@ -35,14 +37,14 @@ jobs:
           TOPICS_FOLDER_NAME = "Topics"               # visible "folder" name in wiki sidebar
           OVERVIEW_PAGE = "Overview.md"              # generated (dynamic) overview page
           NO_TOPICS_PAGE = "Repos-zonder-topics.md"  # generated list of repos without topics
-          
+
           # ------------------------------------------------------------
-          # GitHub GraphQL helper (uses gh cli + GH_TOKEN from env)
+          # Helpers
           # ------------------------------------------------------------
           def gh_graphql(query: str, owner: str, after: str | None):
               """
               Call GitHub GraphQL through `gh api graphql`.
-          
+
               IMPORTANT:
               - owner is passed with -F so it is treated as a string.
               - after is only passed when it has a value (never pass null).
@@ -52,16 +54,41 @@ jobs:
                   cmd += ["-F", f"after={after}"]
               out = subprocess.check_output(cmd, text=True)
               return json.loads(out)
-          
+
+          def norm_display(s: str) -> str:
+              """
+              Normalize for display (keep readable, but remove weird whitespace).
+              """
+              s = unicodedata.normalize("NFKC", (s or ""))
+              s = s.replace("\u00a0", " ")          # NBSP -> normal space
+              s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf")  # remove zero-width chars
+              s = " ".join(s.strip().split())       # collapse whitespace
+              return s
+
+          def slugify(s: str) -> str:
+              """
+              Stable wiki filename slug:
+              - lower
+              - unicode normalize
+              - remove diacritics
+              - keep a-z0-9 and '-'
+              """
+              s = norm_display(s).lower()
+              s = unicodedata.normalize("NFKD", s)
+              s = "".join(ch for ch in s if not unicodedata.combining(ch))
+              s = re.sub(r"[^a-z0-9]+", "-", s)
+              s = re.sub(r"-{2,}", "-", s).strip("-")
+              return s or "untitled"
+
           # ------------------------------------------------------------
           # Main
           # ------------------------------------------------------------
           owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
           if not owner:
               raise RuntimeError("GITHUB_REPOSITORY_OWNER not set (should exist in GitHub Actions)")
-          
+
           print("Scanning owner:", owner)
-          
+
           repos_query = r"""
           query($owner:String!, $after:String) {
             repositoryOwner(login: $owner) {
@@ -81,7 +108,7 @@ jobs:
             }
           }
           """
-          
+
           # Fetch all repos (paging)
           all_repos = []
           after = None
@@ -93,36 +120,52 @@ jobs:
                       f"repositoryOwner(login={owner}) returned null. "
                       "Check owner spelling / token permissions."
                   )
-          
+
               all_repos.extend(ro["repositories"]["nodes"])
               page = ro["repositories"]["pageInfo"]
               if not page["hasNextPage"]:
                   break
               after = page["endCursor"]
-          
-          # Filter out archived/forks (adjust if you want to include them)
+
+          # Filter out archived/forks
           repos = [r for r in all_repos if not r.get("isArchived") and not r.get("isFork")]
           print(f"Total repos fetched: {len(all_repos)} (after filter: {len(repos)})")
-          
-          # Build topic map
-          topics = defaultdict(list)   # topic -> list[repo]
+
+          # Build topic map (dedupe by slug + remove invisible chars)
+          topics = defaultdict(list)   # slug -> list[repo]
+          topic_display = {}           # slug -> display name (first seen)
           no_topics = []
-          
+
           for r in repos:
-              repo_topics = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
-              if not repo_topics:
+              raw_topics = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
+              if not raw_topics:
                   no_topics.append(r)
                   continue
-              for t in repo_topics:
-                  topics[t.strip().lower()].append(r)
-          
-          print(f"Topic keys: {len(topics)} | Repos without topics: {len(no_topics)}")
-          
+
+              seen_slugs_for_repo = set()  # avoid same repo added twice per topic
+              for raw in raw_topics:
+                  display = norm_display(raw)
+                  slug = slugify(display)
+
+                  if slug in seen_slugs_for_repo:
+                      continue
+                  seen_slugs_for_repo.add(slug)
+
+                  if slug not in topic_display:
+                      topic_display[slug] = display
+
+                  topics[slug].append(r)
+
+          print(f"Topic keys (unique slugs): {len(topics)} | Repos without topics: {len(no_topics)}")
+
+          # Clean output dir to prevent stale pages from previous runs
+          shutil.rmtree(OUTDIR, ignore_errors=True)
+
           # Prepare output dirs
           topics_dir = os.path.join(OUTDIR, TOPICS_FOLDER_NAME)
           os.makedirs(OUTDIR, exist_ok=True)
           os.makedirs(topics_dir, exist_ok=True)
-          
+
           # ------------------------------------------------------------
           # 1) Overview.md (dynamic portal page)
           # ------------------------------------------------------------
@@ -134,12 +177,13 @@ jobs:
               "## Topics",
               "",
           ]
-          
-          # Optional: sort topics by number of repos (descending), then name
-          for t in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
-              page = t.replace(" ", "-")
-              overview_lines.append(f"- [[{TOPICS_FOLDER_NAME}/{page}|{t}]] ({len(topics[t])})")
-          
+
+          # Sort topics by number of repos desc, then slug
+          for slug in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
+              overview_lines.append(
+                  f"- [[{TOPICS_FOLDER_NAME}/{slug}|{topic_display[slug]}]] ({len(topics[slug])})"
+              )
+
           overview_lines += [
               "",
               "## Overig",
@@ -147,34 +191,34 @@ jobs:
               f"- [[{NO_TOPICS_PAGE.replace('.md','')}|Repos zonder topics]] ({len(no_topics)})",
               "",
           ]
-          
+
           with open(os.path.join(OUTDIR, OVERVIEW_PAGE), "w", encoding="utf-8") as f:
               f.write("\n".join(overview_lines) + "\n")
-          
+
           # ------------------------------------------------------------
-          # 2) Topic pages: Topics/<topic>.md
+          # 2) Topic pages: Topics/<slug>.md
           # ------------------------------------------------------------
-          for t in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
-              page = t.replace(" ", "-")
+          for slug in sorted(topics.keys(), key=lambda k: (-len(topics[k]), k)):
+              display = topic_display[slug]
               lines = [
-                  f"# {t}",
+                  f"# {display}",
                   "",
                   "Terug naar [[Overview]].",
                   "",
               ]
-          
-              for r in sorted(topics[t], key=lambda x: x["name"].lower()):
+
+              for r in sorted(topics[slug], key=lambda x: x["name"].lower()):
                   desc = (r.get("description") or "").strip()
                   if desc:
                       lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
                   else:
                       lines.append(f"- [{r['name']}]({r['url']})")
-          
+
               lines.append("")
-          
-              with open(os.path.join(topics_dir, f"{page}.md"), "w", encoding="utf-8") as f:
+
+              with open(os.path.join(topics_dir, f"{slug}.md"), "w", encoding="utf-8") as f:
                   f.write("\n".join(lines) + "\n")
-          
+
           # ------------------------------------------------------------
           # 3) Repos-zonder-topics.md
           # ------------------------------------------------------------
@@ -186,7 +230,7 @@ jobs:
               "Terug naar [[Overview]].",
               "",
           ]
-          
+
           if not no_topics:
               no_topics_lines.append("_Alles heeft topics. Nice._")
           else:
@@ -196,12 +240,12 @@ jobs:
                       no_topics_lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
                   else:
                       no_topics_lines.append(f"- [{r['name']}]({r['url']})")
-          
+
           no_topics_lines.append("")
-          
+
           with open(os.path.join(OUTDIR, NO_TOPICS_PAGE), "w", encoding="utf-8") as f:
               f.write("\n".join(no_topics_lines) + "\n")
-          
+
           print(f"Generated: {OVERVIEW_PAGE}, {TOPICS_FOLDER_NAME}/*, {NO_TOPICS_PAGE} in ./{OUTDIR}/")
           PY
 
@@ -214,17 +258,19 @@ jobs:
 
       - name: Copy generated pages into wiki repo
         run: |
-          rsync -a --delete --exclude '.git' _wiki_out/ wiki/
+          rsync -a --delete --exclude '.git' --exclude 'Home.md' _wiki_out/ wiki/
 
       - name: Commit and push wiki changes
         run: |
           cd wiki
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add -A
           if git diff --cached --quiet; then
             echo "No wiki changes."
             exit 0
           fi
+
           git commit -m "Auto-update topic index"
           git push
