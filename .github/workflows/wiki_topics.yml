@@ -137,8 +137,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
-
+          # Zorg dat de map niet bestaat
+          rm -rf wiki
+          
+          # Clone de wiki repo
+          git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki          
+          # Ga naar de wiki
+          cd wiki
       - name: Copy generated pages into wiki repo
         run: |
           rsync -a --delete _wiki_out/ wiki/
