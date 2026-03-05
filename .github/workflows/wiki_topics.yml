@@ -26,8 +26,10 @@ jobs:
           import json, subprocess, os
           from collections import defaultdict
           
-          def gh_graphql(query: str, variables: dict):
-              cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"variables={json.dumps(variables)}"]
+          def gh_graphql(query: str, owner: str, after: str | None):
+              cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}"]
+              if after:
+                  cmd += ["-F", f"after={after}"]
               out = subprocess.check_output(cmd, text=True)
               return json.loads(out)
           
@@ -57,26 +59,23 @@ jobs:
           
           all_repos = []
           after = None
+          
           while True:
-              data = gh_graphql(repos_query, {"owner": owner, "after": after})
+              data = gh_graphql(repos_query, owner, after)
               ro = data["data"]["repositoryOwner"]
               if ro is None:
-                  raise RuntimeError(f"repositoryOwner(login={owner}) returned null (check owner name / permissions)")
+                  raise RuntimeError(f"repositoryOwner(login={owner}) returned null. Check owner spelling / token permissions.")
           
-              chunk = ro["repositories"]["nodes"]
-              all_repos.extend(chunk)
-          
+              all_repos.extend(ro["repositories"]["nodes"])
               page = ro["repositories"]["pageInfo"]
               if not page["hasNextPage"]:
                   break
               after = page["endCursor"]
           
-          # Filter
           repos = [r for r in all_repos if not r.get("isArchived") and not r.get("isFork")]
-          
           print(f"Total repos fetched: {len(all_repos)} (after filter: {len(repos)})")
           
-          # Debug: toon eerste 10 repos + topics
+          # Debug
           for r in repos[:10]:
               ts = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
               print("-", r["name"], "topics:", ts)
@@ -133,6 +132,7 @@ jobs:
           
           print(f"Generated {len(topics)} topic pages and Home.md.")
           PY
+
       - name: Clone wiki repo
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
