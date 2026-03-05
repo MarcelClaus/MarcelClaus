@@ -256,6 +256,14 @@ jobs:
           rm -rf wiki
           git clone --depth 1 "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
 
+      - name: Clean generated wiki pages (keep .git and Home.md)
+        run: |
+          # Verwijder alles behalve .git en Home.md
+          find wiki -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name 'Home.md' \
+            -exec rm -rf {} +
+            
       - name: Copy generated pages into wiki repo
         run: |
           rsync -a --delete --exclude '.git' --exclude 'Home.md' _wiki_out/ wiki/
