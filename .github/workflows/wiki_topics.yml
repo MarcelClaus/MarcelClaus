@@ -31,23 +31,12 @@ jobs:
               out = subprocess.check_output(cmd, text=True)
               return json.loads(out)
           
-          # 1) bepaal alle owners die we willen doorzoeken: jij + je orgs
-          owners_query = r'''
-          query {
-            viewer {
-              login
-              organizations(first: 100) { nodes { login } }
-            }
-          }
-          '''
-          owners_data = gh_graphql(owners_query, {})
-          viewer_login = owners_data["data"]["viewer"]["login"]
-          org_logins = [o["login"] for o in owners_data["data"]["viewer"]["organizations"]["nodes"]]
-          owners = [viewer_login] + org_logins
+          owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+          if not owner:
+              raise RuntimeError("GITHUB_REPOSITORY_OWNER not set")
           
-          print("Owners to scan:", owners)
+          print("Scanning owner:", owner)
           
-          # 2) fetch repos per owner (user + org) met paging
           repos_query = r'''
           query($owner:String!, $after:String) {
             repositoryOwner(login: $owner) {
@@ -67,31 +56,31 @@ jobs:
           '''
           
           all_repos = []
-          for owner in owners:
-              after = None
-              while True:
-                  data = gh_graphql(repos_query, {"owner": owner, "after": after})
-                  ro = data["data"]["repositoryOwner"]
-                  if ro is None:
-                      break
-                  chunk = ro["repositories"]["nodes"]
-                  all_repos.extend(chunk)
-                  page = ro["repositories"]["pageInfo"]
-                  if not page["hasNextPage"]:
-                      break
-                  after = page["endCursor"]
+          after = None
+          while True:
+              data = gh_graphql(repos_query, {"owner": owner, "after": after})
+              ro = data["data"]["repositoryOwner"]
+              if ro is None:
+                  raise RuntimeError(f"repositoryOwner(login={owner}) returned null (check owner name / permissions)")
           
-          # 3) filter zoals jij wil (pas aan als je forks/archived wél wilt)
+              chunk = ro["repositories"]["nodes"]
+              all_repos.extend(chunk)
+          
+              page = ro["repositories"]["pageInfo"]
+              if not page["hasNextPage"]:
+                  break
+              after = page["endCursor"]
+          
+          # Filter
           repos = [r for r in all_repos if not r.get("isArchived") and not r.get("isFork")]
           
           print(f"Total repos fetched: {len(all_repos)} (after filter: {len(repos)})")
           
-          # Debug: laat 10 repos zien met topics
+          # Debug: toon eerste 10 repos + topics
           for r in repos[:10]:
               ts = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
               print("-", r["name"], "topics:", ts)
           
-          # 4) build topic index
           topics = defaultdict(list)
           no_topics = []
           
@@ -103,60 +92,47 @@ jobs:
               for t in repo_topics:
                   topics[t.strip().lower()].append(r)
           
-          print(f"Repos with topics: {sum(len(v) for v in topics.values())} (topic keys: {len(topics)})")
-          print(f"Repos without topics: {len(no_topics)}")
+          print(f"Topic keys: {len(topics)} | Repos without topics: {len(no_topics)}")
           
-          # 5) write wiki output folder
           outdir = "_wiki_out"
           os.makedirs(outdir, exist_ok=True)
           os.makedirs(os.path.join(outdir, "topics"), exist_ok=True)
           
           # Home.md
-          lines = []
-          lines.append("# Wiki Home")
-          lines.append("")
-          lines.append("Dit overzicht is automatisch gegenereerd uit GitHub repository topics.")
-          lines.append("")
-          lines.append("## Topics")
-          lines.append("")
-          
+          lines = [
+              "# Wiki Home",
+              "",
+              "Dit overzicht is automatisch gegenereerd uit GitHub repository topics.",
+              "",
+              "## Topics",
+              "",
+          ]
           for t in sorted(topics.keys()):
               page = t.replace(" ", "-")
               lines.append(f"- [[topics/{page}|{t}]]")
-          
           lines.append("")
           
           if no_topics:
-              lines.append("## Repos zonder topics")
-              lines.append("")
+              lines += ["## Repos zonder topics", ""]
               for r in sorted(no_topics, key=lambda x: x["name"].lower()):
                   desc = (r.get("description") or "").strip()
-                  if desc:
-                      lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
-                  else:
-                      lines.append(f"- [{r['name']}]({r['url']})")
+                  lines.append(f"- [{r['name']}]({r['url']})" + (f" — {desc}" if desc else ""))
               lines.append("")
           
           open(os.path.join(outdir, "Home.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
           
-          # Per topic pagina
+          # per-topic pagina
           for t in sorted(topics.keys()):
               page = t.replace(" ", "-")
-              pl = [f"# {t}", ""]
-              pl.append("Terug naar [[Home]].")
-              pl.append("")
+              pl = [f"# {t}", "", "Terug naar [[Home]].", ""]
               for r in sorted(topics[t], key=lambda x: x["name"].lower()):
                   desc = (r.get("description") or "").strip()
-                  if desc:
-                      pl.append(f"- [{r['name']}]({r['url']}) — {desc}")
-                  else:
-                      pl.append(f"- [{r['name']}]({r['url']})")
+                  pl.append(f"- [{r['name']}]({r['url']})" + (f" — {desc}" if desc else ""))
               pl.append("")
               open(os.path.join(outdir, "topics", f"{page}.md"), "w", encoding="utf-8").write("\n".join(pl) + "\n")
           
           print(f"Generated {len(topics)} topic pages and Home.md.")
           PY
-
       - name: Clone wiki repo
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
