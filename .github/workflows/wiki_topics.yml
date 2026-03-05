@@ -23,25 +23,35 @@ jobs:
 
           # 1) Haal jouw repos op + topics (40 repos -> 1 pagina is genoeg; toch maken we paging-proof)
           python3 - <<'PY'
-          import json, subprocess, sys
+          import json, subprocess, os
           from collections import defaultdict
-
-          def gh_graphql(query, variables):
-              cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
           
-              for k, v in variables.items():
-                  if v is None:
-                      continue  # niet meegeven => GraphQL ziet dit als null
-                  cmd.extend(["-f", f"{k}={v}"])  # v is hier altijd een string cursor
-          
+          def gh_graphql(query: str, variables: dict):
+              cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"variables={json.dumps(variables)}"]
               out = subprocess.check_output(cmd, text=True)
               return json.loads(out)
-
-    
-          query = r'''
-          query($after:String) {
+          
+          # 1) bepaal alle owners die we willen doorzoeken: jij + je orgs
+          owners_query = r'''
+          query {
             viewer {
-              repositories(first: 100, after: $after, ownerAffiliations: OWNER, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              login
+              organizations(first: 100) { nodes { login } }
+            }
+          }
+          '''
+          owners_data = gh_graphql(owners_query, {})
+          viewer_login = owners_data["data"]["viewer"]["login"]
+          org_logins = [o["login"] for o in owners_data["data"]["viewer"]["organizations"]["nodes"]]
+          owners = [viewer_login] + org_logins
+          
+          print("Owners to scan:", owners)
+          
+          # 2) fetch repos per owner (user + org) met paging
+          repos_query = r'''
+          query($owner:String!, $after:String) {
+            repositoryOwner(login: $owner) {
+              repositories(first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
                   name
@@ -53,45 +63,54 @@ jobs:
                 }
               }
             }
-          }'''
-
-          repos = []
-          after = None
+          }
+          '''
           
-          while True:
-              vars = {}
-              if after is not None:
-                  vars["after"] = after
+          all_repos = []
+          for owner in owners:
+              after = None
+              while True:
+                  data = gh_graphql(repos_query, {"owner": owner, "after": after})
+                  ro = data["data"]["repositoryOwner"]
+                  if ro is None:
+                      break
+                  chunk = ro["repositories"]["nodes"]
+                  all_repos.extend(chunk)
+                  page = ro["repositories"]["pageInfo"]
+                  if not page["hasNextPage"]:
+                      break
+                  after = page["endCursor"]
           
-              data = gh_graphql(query, vars)
-              r = data["data"]["viewer"]["repositories"]
-              repos.extend(r["nodes"])
+          # 3) filter zoals jij wil (pas aan als je forks/archived wél wilt)
+          repos = [r for r in all_repos if not r.get("isArchived") and not r.get("isFork")]
           
-              if not r["pageInfo"]["hasNextPage"]:
-                  break
-              after = r["pageInfo"]["endCursor"]
-
-    
-          # Filter: geen archived, geen forks
-          repos = [r for r in repos if not r.get("isArchived") and not r.get("isFork")]
-
+          print(f"Total repos fetched: {len(all_repos)} (after filter: {len(repos)})")
+          
+          # Debug: laat 10 repos zien met topics
+          for r in repos[:10]:
+              ts = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
+              print("-", r["name"], "topics:", ts)
+          
+          # 4) build topic index
           topics = defaultdict(list)
           no_topics = []
-
+          
           for r in repos:
-            repo_topics = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
-            if not repo_topics:
-              no_topics.append(r)
-              continue
-            for t in repo_topics:
-              topics[t.strip().lower()].append(r)
-
-          # Schrijf output naar ./_wiki_out (we kopiëren dit straks naar de wiki repo)
-          import os
+              repo_topics = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
+              if not repo_topics:
+                  no_topics.append(r)
+                  continue
+              for t in repo_topics:
+                  topics[t.strip().lower()].append(r)
+          
+          print(f"Repos with topics: {sum(len(v) for v in topics.values())} (topic keys: {len(topics)})")
+          print(f"Repos without topics: {len(no_topics)}")
+          
+          # 5) write wiki output folder
           outdir = "_wiki_out"
           os.makedirs(outdir, exist_ok=True)
           os.makedirs(os.path.join(outdir, "topics"), exist_ok=True)
-
+          
           # Home.md
           lines = []
           lines.append("# Wiki Home")
@@ -100,41 +119,42 @@ jobs:
           lines.append("")
           lines.append("## Topics")
           lines.append("")
+          
           for t in sorted(topics.keys()):
-            # Wiki links: [[topics/<PageName>]]
-            page = t.replace(" ", "-")
-            lines.append(f"- [[topics/{page}|{t}]]")
+              page = t.replace(" ", "-")
+              lines.append(f"- [[topics/{page}|{t}]]")
+          
           lines.append("")
-
+          
           if no_topics:
-            lines.append("## Repos zonder topics")
-            lines.append("")
-            for r in sorted(no_topics, key=lambda x: x["name"].lower()):
-              desc = (r.get("description") or "").strip()
-              if desc:
-                lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
-              else:
-                lines.append(f"- [{r['name']}]({r['url']})")
-            lines.append("")
-
+              lines.append("## Repos zonder topics")
+              lines.append("")
+              for r in sorted(no_topics, key=lambda x: x["name"].lower()):
+                  desc = (r.get("description") or "").strip()
+                  if desc:
+                      lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
+                  else:
+                      lines.append(f"- [{r['name']}]({r['url']})")
+              lines.append("")
+          
           open(os.path.join(outdir, "Home.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
-
-          # Per-topic pagina
+          
+          # Per topic pagina
           for t in sorted(topics.keys()):
-            page = t.replace(" ", "-")
-            pl = [f"# {t}", ""]
-            pl.append(f"Terug naar [[Home]].")
-            pl.append("")
-            for r in sorted(topics[t], key=lambda x: x["name"].lower()):
-              desc = (r.get("description") or "").strip()
-              if desc:
-                pl.append(f"- [{r['name']}]({r['url']}) — {desc}")
-              else:
-                pl.append(f"- [{r['name']}]({r['url']})")
-            pl.append("")
-            open(os.path.join(outdir, "topics", f"{page}.md"), "w", encoding="utf-8").write("\n".join(pl) + "\n")
-
-          print(f"Generated {len(topics)} topic pages and Home.md from {len(repos)} repos.")
+              page = t.replace(" ", "-")
+              pl = [f"# {t}", ""]
+              pl.append("Terug naar [[Home]].")
+              pl.append("")
+              for r in sorted(topics[t], key=lambda x: x["name"].lower()):
+                  desc = (r.get("description") or "").strip()
+                  if desc:
+                      pl.append(f"- [{r['name']}]({r['url']}) — {desc}")
+                  else:
+                      pl.append(f"- [{r['name']}]({r['url']})")
+              pl.append("")
+              open(os.path.join(outdir, "topics", f"{page}.md"), "w", encoding="utf-8").write("\n".join(pl) + "\n")
+          
+          print(f"Generated {len(topics)} topic pages and Home.md.")
           PY
 
       - name: Clone wiki repo
