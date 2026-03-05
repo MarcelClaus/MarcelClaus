@@ -27,10 +27,15 @@ jobs:
           from collections import defaultdict
 
           def gh_graphql(query, variables):
-            cmd = ["gh","api","graphql","-f",f"query={query}"] + [ "-f", f"{k}={json.dumps(v)}" for k,v in variables.items() ]
+            cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+        
+            for k, v in variables.items():
+                cmd.extend(["-f", f"{k}={json.dumps(v)}"])
+        
             out = subprocess.check_output(cmd, text=True)
             return json.loads(out)
 
+    
           query = r'''
           query($after:String) {
             viewer {
