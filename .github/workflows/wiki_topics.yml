@@ -27,13 +27,15 @@ jobs:
           from collections import defaultdict
 
           def gh_graphql(query, variables):
-            cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
-        
-            for k, v in variables.items():
-                cmd.extend(["-f", f"{k}={json.dumps(v)}"])
-        
-            out = subprocess.check_output(cmd, text=True)
-            return json.loads(out)
+              cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+          
+              for k, v in variables.items():
+                  if v is None:
+                      continue  # niet meegeven => GraphQL ziet dit als null
+                  cmd.extend(["-f", f"{k}={v}"])  # v is hier altijd een string cursor
+          
+              out = subprocess.check_output(cmd, text=True)
+              return json.loads(out)
 
     
           query = r'''
@@ -55,14 +57,21 @@ jobs:
 
           repos = []
           after = None
+          
           while True:
-            data = gh_graphql(query, {"after": after})
-            r = data["data"]["viewer"]["repositories"]
-            repos.extend(r["nodes"])
-            if not r["pageInfo"]["hasNextPage"]:
-              break
-            after = r["pageInfo"]["endCursor"]
+              vars = {}
+              if after is not None:
+                  vars["after"] = after
+          
+              data = gh_graphql(query, vars)
+              r = data["data"]["viewer"]["repositories"]
+              repos.extend(r["nodes"])
+          
+              if not r["pageInfo"]["hasNextPage"]:
+                  break
+              after = r["pageInfo"]["endCursor"]
 
+    
           # Filter: geen archived, geen forks
           repos = [r for r in repos if not r.get("isArchived") and not r.get("isFork")]
 
