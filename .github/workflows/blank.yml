@@ -1,0 +1,96 @@
+name: Generate topic index
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # elke maandag 06:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate TOPICS.md from all repos (GraphQL)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Haal repos op van de ingelogde gebruiker (viewer) met topics
+          # Let op: voor veel repos heb je paging nodig; dit pakt de eerste 100.
+          # Voor meer: zie "paging" onderaan.
+          gh api graphql -f query='
+            query {
+              viewer {
+                repositories(first: 100, ownerAffiliations: OWNER, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                  nodes {
+                    name
+                    description
+                    url
+                    isArchived
+                    repositoryTopics(first: 20) {
+                      nodes { topic { name } }
+                    }
+                  }
+                }
+              }
+            }' > repos.json
+
+          python3 - <<'PY'
+          import json
+          from collections import defaultdict
+
+          data = json.load(open("repos.json"))
+          repos = data["data"]["viewer"]["repositories"]["nodes"]
+
+          topics = defaultdict(list)
+
+          for r in repos:
+            if r.get("isArchived"):
+              continue
+            repo_topics = [n["topic"]["name"] for n in (r.get("repositoryTopics", {}).get("nodes") or [])]
+            if not repo_topics:
+              continue
+            for t in repo_topics:
+              topics[t.lower()].append(r)
+
+          # Sorteer topics alfabetisch
+          lines = []
+          lines.append("# Topics → Projects")
+          lines.append("")
+          lines.append("Dit overzicht is automatisch gegenereerd met GitHub Actions.")
+          lines.append("")
+
+          if not topics:
+            lines.append("_Geen topics gevonden. Voeg repo topics toe via GitHub → repo → About → Topics._")
+          else:
+            for topic in sorted(topics.keys()):
+              lines.append(f"## {topic}")
+              lines.append("")
+              # Sorteer repos binnen topic op naam
+              for r in sorted(topics[topic], key=lambda x: x["name"].lower()):
+                desc = (r.get("description") or "").strip()
+                if desc:
+                  lines.append(f"- [{r['name']}]({r['url']}) — {desc}")
+                else:
+                  lines.append(f"- [{r['name']}]({r['url']})")
+              lines.append("")
+
+          open("TOPICS.md", "w", encoding="utf-8").write("\n".join(lines) + "\n")
+          PY
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add TOPICS.md
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "Auto-update TOPICS.md"
+          git push
