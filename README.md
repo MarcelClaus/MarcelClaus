@@ -7,3 +7,7 @@ This profile contains multiple projects related to software development and expe
 Start exploring the wiki here:
 
 ➡️ https://github.com/MarcelClaus/MarcelClaus/wiki
+
+Or visit my Github Pages website:
+
+➡️ https://marcelclaus.github.io/MarcelClaus/
